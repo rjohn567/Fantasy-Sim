@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from sleeper_wrapper import League as SleeperLeague
 from espn_api.football import League as EspnLeague
+import csv
 
 # --- CONFIGURATION ---
 # Replace these with your actual league details and credentials.
@@ -10,13 +11,39 @@ from espn_api.football import League as EspnLeague
 
 # Sleeper Config
 SLEEPER_LEAGUE_ID = os.environ.get("SLEEPER_LEAGUE_ID", "1180175868088176640")
-
 # ESPN Config
-ESPN_LEAGUE_ID = int(os.environ.get("ESPN_LEAGUE_ID", 12345))
-ESPN_YEAR = 2024 # The current season year
-ESPN_S2_COOKIE = os.environ.get("ESPN_S2_COOKIE", "YOUR_ESPN_S2_COOKIE")
-SWID_COOKIE = os.environ.get("SWID_COOKIE", "{YOUR-SWID-COOKIE}")
+ESPN_LEAGUE_ID = int(os.environ.get("ESPN_LEAGUE_ID", 1247675))
+ESPN_YEAR = 2025 # The current season year
 
+
+# Function to load ESPN cookies from a CSV file
+def load_espn_cookies(file_path):
+    swid = None
+    espn_s2 = None
+    try:
+        with open(file_path, 'r') as f:
+            reader = csv.reader(f)
+            # Assuming SWID is in column 0, row 1 and S2 is in column 1, row 1
+            # Skip header row if present, or adjust if no header
+            rows = list(reader)
+            if len(rows) > 1: # Ensure there's at least a second row for 0-based index 1
+                if len(rows[1]) > 0:
+                    swid = rows[1][0]
+                if len(rows[1]) > 1:
+                    espn_s2 = rows[1][1]
+    except FileNotFoundError:
+        print(f"Warning: ESPN cookie file not found at {file_path}. Using environment variables or defaults.")
+    except IndexError:
+        print(f"Warning: ESPN cookie file at {file_path} does not have expected format. Using environment variables or defaults.")
+    return swid, espn_s2
+
+# Load cookies from CSV
+ESPN_COOKIES_FILE = "/Users/ryan/Documents/Passwords/ESPN.csv"
+csv_swid, csv_espn_s2 = load_espn_cookies(ESPN_COOKIES_FILE)
+
+# Prioritize CSV loaded cookies, then environment variables, then hardcoded defaults
+SWID_COOKIE = csv_swid 
+ESPN_S2_COOKIE = csv_espn_s2
 # Simulation Config
 NUM_SIMULATIONS = 10000
 REGULAR_SEASON_WEEKS = 14 # Adjust if your league has a different regular season length
