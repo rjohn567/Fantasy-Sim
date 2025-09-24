@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 
 # Page configuration
-st.set_page_config(page_title="Fantasy Football Analytics", layout="wide")
+st.set_page_config(page_title="Smokeback Analytics", layout="wide")
 
 # --- Data Loading and Caching ---
 @st.cache_data
@@ -16,7 +16,7 @@ def load_data(file_path):
 
 # --- UI for Dynasty Page ---
 def display_dynasty_page():
-    st.title("Dynasty League Analytics (Sleeper)")
+    st.title("Owners Analytics")
 
     # --- Power Rankings ---
     st.header("Power Rankings")
@@ -62,7 +62,7 @@ def display_dynasty_page():
 
 # --- UI for OG Page ---
 def display_og_page():
-    st.title("OG League Analytics (ESPN)")
+    st.title("E-Boy League of Fantasy Football Analytics - Coming Soon")
     st.header("Coming Soon")
     st.write("This page will be updated after the ESPN API integration is complete.")
 
@@ -70,10 +70,10 @@ def display_og_page():
 st.sidebar.title("Navigation")
 page_selection = st.sidebar.radio(
     "Go to",
-    ["Dynasty League", "OG League"]
+    ["Owners", "ELFF"]
 )
 
-if page_selection == "Dynasty League":
+if page_selection == "Owners":
     display_dynasty_page()
-elif page_selection == "OG League":
+elif page_selection == "ELFF":
     display_og_page()
