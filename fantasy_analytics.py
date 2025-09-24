@@ -18,7 +18,7 @@ ESPN_S2_COOKIE = os.environ.get("ESPN_S2_COOKIE", "YOUR_ESPN_S2_COOKIE")
 SWID_COOKIE = os.environ.get("SWID_COOKIE", "{YOUR-SWID-COOKIE}")
 
 # Simulation Config
-NUM_SIMULATIONS = 10000
+NUM_SIMULATIONS = 100000
 REGULAR_SEASON_WEEKS = 14 # Adjust if your league has a different regular season length
 
 # --- HELPER FUNCTIONS ---
@@ -37,22 +37,75 @@ def get_team_mapping(league_api_obj, league_type):
             team_map[team.team_id] = team.team_name
     return team_map
 
-def calculate_power_rankings(df):
+def calculate_weekly_win_pct_vs_everyone(all_scores, team_map):
     """
-    Calculates power rankings based on a team's record and points scored.
-    Assumes df has columns: 'Team', 'W', 'L', 'T', 'PF'.
+    Calculates the 'win % vs everyone' metric for each team.
+    This is the average percentage of opponents a team would have beaten each week.
+    """
+    weekly_wins_vs_everyone = {team_id: [] for team_id in team_map.keys()}
+    num_teams = len(team_map)
+    if num_teams <= 1:
+        return {name: 0 for name in team_map.values()}
+
+    # Get a list of all weekly scores for all teams
+    # Structure: {week_index: {team_id: score}}
+    scores_by_week = {}
+    for team_id, scores in all_scores.items():
+        for week_idx, score in enumerate(scores):
+            if week_idx not in scores_by_week:
+                scores_by_week[week_idx] = {}
+            scores_by_week[week_idx][team_id] = score
+
+    # Calculate win % vs everyone for each week
+    for week_idx, weekly_scores in scores_by_week.items():
+        if len(weekly_scores) < 2: continue # Not enough scores to compare
+
+        for team_id, score in weekly_scores.items():
+            wins = 0
+            opponents = 0
+            for opponent_id, opponent_score in weekly_scores.items():
+                if team_id != opponent_id:
+                    opponents += 1
+                    if score > opponent_score:
+                        wins += 1
+            if opponents > 0:
+                weekly_wins_vs_everyone[team_id].append(wins / opponents)
+
+    # Calculate the average across all weeks for each team
+    win_pct_vs_everyone = {}
+    for team_id, weekly_pcts in weekly_wins_vs_everyone.items():
+        team_name = team_map.get(team_id)
+        if team_name:
+            if weekly_pcts:
+                win_pct_vs_everyone[team_name] = np.mean(weekly_pcts)
+            else:
+                win_pct_vs_everyone[team_name] = 0
+    
+    return win_pct_vs_everyone
+
+def calculate_power_rankings(df, win_vs_everyone):
+    """
+    Calculates power rankings based on the user's specified formula.
+    Formula: (PF / highest PF) + win % + win % vs everyone
     """
     if df.empty or (df['W'] + df['L'] + df['T']).sum() == 0:
         return pd.DataFrame(columns=['Rank', 'Team', 'Power Score', 'W', 'L', 'T', 'PF'])
 
+    # Normalize PF
+    highest_pf = df['PF'].max()
+    if highest_pf == 0:
+        df['Normalized PF'] = 0
+    else:
+        df['Normalized PF'] = df['PF'] / highest_pf
+
+    # Calculate Win %
     df['Win %'] = (df['W'] + 0.5 * df['T']) / (df['W'] + df['L'] + df['T'])
     
-    # Use rank(pct=True) to normalize scores, which is robust to outliers
-    df['Win % Rank'] = df['Win %'].rank(pct=True)
-    df['PF Rank'] = df['PF'].rank(pct=True)
-    
-    # Calculate Power Score with a 60/40 weighting towards points as it's a better indicator of team strength
-    df['Power Score'] = (0.4 * df['Win % Rank'] + 0.6 * df['PF Rank']) * 100
+    # Add Win % vs Everyone
+    df['Win % vs Everyone'] = df['Team'].map(win_vs_everyone).fillna(0)
+
+    # Calculate final Power Score by averaging the components
+    df['Power Score'] = (df['Normalized PF'] + df['Win %'] + df['Win % vs Everyone']) / 3
     
     df_ranked = df.sort_values(by='Power Score', ascending=False).reset_index(drop=True)
     df_ranked['Rank'] = df_ranked.index + 1
@@ -103,16 +156,30 @@ def create_win_probability_df(win_distribution, total_games):
     Converts the simulation win distribution into a probability table.
     """
     win_projections = {}
+    projected_wins = {}
     for team, wins_array in win_distribution.items():
         # Count occurrences of each win total
         win_counts = np.bincount(wins_array, minlength=total_games + 1)
         # Convert counts to probabilities
         probabilities = win_counts / len(wins_array)
         win_projections[team] = probabilities
+        projected_wins[team] = np.mean(wins_array)
 
     df = pd.DataFrame(win_projections).T
     df.columns = [f"{i} Wins" for i in range(total_games + 1)]
     df = df.reset_index().rename(columns={'index': 'Team'})
+    
+    # Add and format projected wins
+    df['Projected Wins'] = df['Team'].map(projected_wins)
+    
+    # Sort by projected wins (as float) before formatting
+    df = df.sort_values(by='Projected Wins', ascending=False).reset_index(drop=True)
+    df['Projected Wins'] = df['Projected Wins'].map('{:.2f}'.format)
+
+    # Reorder columns to be descending from total_games
+    win_cols = [f"{i} Wins" for i in range(total_games, -1, -1)]
+    df = df[['Team', 'Projected Wins'] + win_cols]
+    
     return df
 
 # --- LEAGUE PROCESSING ---
@@ -140,6 +207,7 @@ def process_league(league_name, league_api, league_type):
         # Get scores and records
         team_records = []
         all_scores = {team_id: [] for team_id in team_map.keys()}
+        wins_from_scores = {team_id: 0 for team_id in team_map.keys()}
         
         # Pre-fetch rosters for sleeper to avoid multiple calls
         rosters = league_api.get_rosters() if league_type == 'sleeper' else None
@@ -147,7 +215,6 @@ def process_league(league_name, league_api, league_type):
         for week in range(1, current_week):
             if league_type == 'sleeper':
                 matchups = league_api.get_matchups(week)
-                # Group matchups by matchup_id to process pairs
                 matchup_groups = {}
                 for m in matchups:
                     matchup_id = m.get('matchup_id')
@@ -158,24 +225,29 @@ def process_league(league_name, league_api, league_type):
 
                 for matchup_id, teams in matchup_groups.items():
                     if len(teams) == 2:
-                        team1 = teams[0]
-                        team2 = teams[1]
-                        # Ensure we have scores for both before appending
+                        team1, team2 = teams[0], teams[1]
                         if 'points' in team1 and 'points' in team2:
                             all_scores[team1['roster_id']].append(team1['points'])
                             all_scores[team2['roster_id']].append(team2['points'])
+                            if team1['points'] > team2['points']:
+                                wins_from_scores[team1['roster_id']] += 1
+                            elif team2['points'] > team1['points']:
+                                wins_from_scores[team2['roster_id']] += 1
 
             elif league_type == 'espn':
                 matchups = league_api.box_scores(week)
                 for m in matchups:
-                    home_team, away_team = m.home_team, m.away_team
-                    if not home_team or not away_team: continue # Bye week
-                    home_id, away_id = home_team.team_id, away_team.team_id
+                    if not m.home_team or not m.away_team: continue
+                    home_id, away_id = m.home_team.team_id, m.away_team.team_id
                     home_score, away_score = m.home_score, m.away_score
                     all_scores[home_id].append(home_score)
                     all_scores[away_id].append(away_score)
+                    if home_score > away_score:
+                        wins_from_scores[home_id] += 1
+                    elif away_score > home_score:
+                        wins_from_scores[away_id] += 1
 
-        # Build records dataframe
+        # Build records dataframe for display (using API data)
         if league_type == 'sleeper':
             if rosters:
                 for roster in rosters:
@@ -185,10 +257,8 @@ def process_league(league_name, league_api, league_type):
                         record = roster['settings']
                         team_records.append({'Team': name, 'W': record['wins'], 'L': record['losses'], 'T': record['ties'], 'PF': record['fpts']})
         elif league_type == 'espn':
-            for team_id, name in team_map.items():
-                team = next((t for t in league_api.teams if t.team_id == team_id), None)
-                if team:
-                    team_records.append({'Team': name, 'W': team.wins, 'L': team.losses, 'T': team.ties, 'PF': team.points_for})
+            for team in league_api.teams:
+                team_records.append({'Team': team.team_name, 'W': team.wins, 'L': team.losses, 'T': team.ties, 'PF': team.points_for})
         
         records_df = pd.DataFrame(team_records)
 
@@ -197,29 +267,27 @@ def process_league(league_name, league_api, league_type):
         return
 
     # 2. Calculate Power Rankings
-    power_rankings_df = calculate_power_rankings(records_df.copy())
+    win_vs_everyone = calculate_weekly_win_pct_vs_everyone(all_scores, team_map)
+    power_rankings_df = calculate_power_rankings(records_df.copy(), win_vs_everyone)
     power_rankings_df.to_csv(f"{league_name}_power_rankings.csv", index=False)
     print(f"✓ Saved {league_name}_power_rankings.csv")
 
     # 3. Run Monte Carlo Simulation
-    if not all(all_scores.values()) or current_week > REGULAR_SEASON_WEEKS:
+    if not any(all_scores.values()) or current_week > REGULAR_SEASON_WEEKS:
         print("Not enough data or season is over. Skipping win projection simulation.")
         return
 
-    # Prep data for simulation
+    # Prep data for simulation using manually calculated wins
     teams_data_for_sim = {}
     for team_id, scores in all_scores.items():
         if scores:
             team_name = team_map.get(team_id)
             if not team_name: continue
-            record_row = records_df[records_df['Team'] == team_name]
-            if not record_row.empty:
-                record = record_row.iloc[0]
-                teams_data_for_sim[team_name] = {
-                    'mean': np.mean(scores),
-                    'std': np.std(scores) if np.std(scores) > 0 else 1.0, # Avoid std of 0
-                    'wins': record['W']
-                }
+            teams_data_for_sim[team_name] = {
+                'mean': np.mean(scores),
+                'std': np.std(scores) if np.std(scores) > 0 else 1.0,
+                'wins': wins_from_scores[team_id]
+            }
 
     # Get remaining schedule
     remaining_schedule = []
@@ -241,7 +309,7 @@ def process_league(league_name, league_api, league_type):
         
         elif league_type == 'espn':
             for match in schedule:
-                if match.home_team and match.away_team: # Not a bye week
+                if match.home_team and match.away_team:
                     weekly_matchups.append((match.home_team.team_name, match.away_team.team_name))
         
         remaining_schedule.append(weekly_matchups)
@@ -265,7 +333,6 @@ def main():
     if SLEEPER_LEAGUE_ID != "YOUR_SLEEPER_LEAGUE_ID":
         try:
             sleeper_league = SleeperLeague(SLEEPER_LEAGUE_ID)
-            print(dir(sleeper_league))
             process_league("Sleeper_Dynasty", sleeper_league, 'sleeper')
         except Exception as e:
             print(f"Could not connect to Sleeper league. Check your LEAGUE_ID. Error: {e}")
