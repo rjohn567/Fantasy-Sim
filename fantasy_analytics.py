@@ -18,7 +18,7 @@ ESPN_S2_COOKIE = os.environ.get("ESPN_S2_COOKIE", "YOUR_ESPN_S2_COOKIE")
 SWID_COOKIE = os.environ.get("SWID_COOKIE", "{YOUR-SWID-COOKIE}")
 
 # Simulation Config
-NUM_SIMULATIONS = 100000
+NUM_SIMULATIONS = 10000
 REGULAR_SEASON_WEEKS = 14 # Adjust if your league has a different regular season length
 
 # --- HELPER FUNCTIONS ---
@@ -117,7 +117,7 @@ def run_monte_carlo_simulation(teams_data, remaining_schedule, num_simulations):
     Runs a Monte Carlo simulation for the rest of the season.
     
     Args:
-        teams_data (dict): Team stats (mean, std, current wins).
+        teams_data (dict): Team stats (mean, std, current wins, current losses).
         remaining_schedule (list): List of matchups for future weeks.
         num_simulations (int): Number of simulations to run.
 
@@ -126,14 +126,21 @@ def run_monte_carlo_simulation(teams_data, remaining_schedule, num_simulations):
               of final win totals for each simulation.
     """
     simulation_wins_distribution = {team: np.zeros(num_simulations, dtype=int) for team in teams_data}
+    remaining_games = {team: REGULAR_SEASON_WEEKS - (data.get('wins', 0) + data.get('losses', 0)) 
+                      for team, data in teams_data.items()}
 
     for i in range(num_simulations):
         # Start with current wins for this simulation run
         temp_wins = {team: data['wins'] for team, data in teams_data.items()}
+        temp_remaining = remaining_games.copy()
 
         for week_matchups in remaining_schedule:
             for team_a_name, team_b_name in week_matchups:
                 if team_a_name is None or team_b_name is None: continue
+                
+                # Skip if either team has no remaining games
+                if temp_remaining[team_a_name] <= 0 or temp_remaining[team_b_name] <= 0:
+                    continue
 
                 # Generate random scores based on team's historical performance
                 score_a = np.random.normal(teams_data[team_a_name]['mean'], teams_data[team_a_name]['std'])
@@ -143,7 +150,9 @@ def run_monte_carlo_simulation(teams_data, remaining_schedule, num_simulations):
                     temp_wins[team_a_name] += 1
                 elif score_b > score_a:
                     temp_wins[team_b_name] += 1
-                # Ties are rare and can be ignored for simplicity, or add 0.5 to each
+                # Update remaining games
+                temp_remaining[team_a_name] -= 1
+                temp_remaining[team_b_name] -= 1
         
         # Store the final win count for this simulation
         for team, wins in temp_wins.items():
@@ -151,13 +160,21 @@ def run_monte_carlo_simulation(teams_data, remaining_schedule, num_simulations):
             
     return simulation_wins_distribution
 
-def create_win_probability_df(win_distribution, total_games):
+def create_win_probability_df(win_distribution, total_games, teams_data):
     """
     Converts the simulation win distribution into a probability table.
     """
     win_projections = {}
     projected_wins = {}
     for team, wins_array in win_distribution.items():
+        # Get the number of losses for the current team
+        team_losses = teams_data.get(team, {}).get('losses', 0)
+        # Calculate the maximum possible wins for the team
+        max_possible_wins = total_games - team_losses
+
+        # Clip wins to the max possible for that specific team
+        wins_array = np.clip(wins_array, 0, max_possible_wins)
+
         # Count occurrences of each win total
         win_counts = np.bincount(wins_array, minlength=total_games + 1)
         # Convert counts to probabilities
@@ -277,16 +294,21 @@ def process_league(league_name, league_api, league_type):
         print("Not enough data or season is over. Skipping win projection simulation.")
         return
 
-    # Prep data for simulation using manually calculated wins
+    # Prep data for simulation using wins from the records_df
     teams_data_for_sim = {}
     for team_id, scores in all_scores.items():
         if scores:
             team_name = team_map.get(team_id)
             if not team_name: continue
+
+            team_record = records_df.loc[records_df['Team'] == team_name]
+            if team_record.empty: continue
+
             teams_data_for_sim[team_name] = {
                 'mean': np.mean(scores),
                 'std': np.std(scores) if np.std(scores) > 0 else 1.0,
-                'wins': wins_from_scores[team_id]
+                'wins': team_record['W'].iloc[0],
+                'losses': team_record['L'].iloc[0]
             }
 
     # Get remaining schedule
@@ -317,7 +339,7 @@ def process_league(league_name, league_api, league_type):
     # Run simulation and create output table
     if teams_data_for_sim and remaining_schedule:
         win_distribution = run_monte_carlo_simulation(teams_data_for_sim, remaining_schedule, NUM_SIMULATIONS)
-        win_prob_df = create_win_probability_df(win_distribution, REGULAR_SEASON_WEEKS)
+        win_prob_df = create_win_probability_df(win_distribution, REGULAR_SEASON_WEEKS, teams_data_for_sim)
         win_prob_df.to_csv(f"{league_name}_win_projections.csv", index=False, float_format='%.4f')
         print(f"✓ Saved {league_name}_win_projections.csv")
     else:
