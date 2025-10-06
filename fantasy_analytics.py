@@ -66,13 +66,16 @@ def get_team_mapping(league_api_obj, league_type):
 
 def calculate_weekly_win_pct_vs_everyone(all_scores, team_map):
     """
-    Calculates the 'win % vs everyone' metric for each team.
-    This is the average percentage of opponents a team would have beaten each week.
+    Calculates the 'win % vs everyone' metric and total W-L record for each team.
+    Returns both the win percentage and total W-L record against all teams.
     """
     weekly_wins_vs_everyone = {team_id: [] for team_id in team_map.keys()}
+    total_wins_vs_everyone = {team_id: 0 for team_id in team_map.keys()}
+    total_games_vs_everyone = {team_id: 0 for team_id in team_map.keys()}
+    
     num_teams = len(team_map)
     if num_teams <= 1:
-        return {name: 0 for name in team_map.values()}
+        return {name: 0 for name in team_map.values()}, {name: "0-0" for name in team_map.values()}
 
     # Get a list of all weekly scores for all teams
     # Structure: {week_index: {team_id: score}}
@@ -97,26 +100,36 @@ def calculate_weekly_win_pct_vs_everyone(all_scores, team_map):
                         wins += 1
             if opponents > 0:
                 weekly_wins_vs_everyone[team_id].append(wins / opponents)
+                total_wins_vs_everyone[team_id] += wins
+                total_games_vs_everyone[team_id] += opponents
 
     # Calculate the average across all weeks for each team
     win_pct_vs_everyone = {}
+    total_record_vs_everyone = {}
+    
     for team_id, weekly_pcts in weekly_wins_vs_everyone.items():
         team_name = team_map.get(team_id)
         if team_name:
             if weekly_pcts:
                 win_pct_vs_everyone[team_name] = np.mean(weekly_pcts)
+                total_wins = total_wins_vs_everyone[team_id]
+                total_games = total_games_vs_everyone[team_id]
+                total_losses = total_games - total_wins
+                total_record_vs_everyone[team_name] = f"{total_wins}-{total_losses}"
             else:
                 win_pct_vs_everyone[team_name] = 0
+                total_record_vs_everyone[team_name] = "0-0"
     
-    return win_pct_vs_everyone
+    return win_pct_vs_everyone, total_record_vs_everyone
 
-def calculate_power_rankings(df, win_vs_everyone):
+def calculate_power_rankings(df, win_vs_everyone, total_record_vs_everyone):
     """
     Calculates power rankings based on the user's specified formula.
     Formula: (PF / highest PF) + win % + win % vs everyone
+    Also includes actual record and total record vs everyone
     """
     if df.empty or (df['W'] + df['L'] + df['T']).sum() == 0:
-        return pd.DataFrame(columns=['Rank', 'Team', 'Power Score', 'W', 'L', 'T', 'PF'])
+        return pd.DataFrame(columns=['Rank', 'Team', 'Power Score', 'W-L-T', 'Total W-L', 'PF'])
 
     # Normalize PF
     highest_pf = df['PF'].max()
@@ -134,10 +147,16 @@ def calculate_power_rankings(df, win_vs_everyone):
     # Calculate final Power Score by averaging the components
     df['Power Score'] = (df['Normalized PF'] + df['Win %'] + df['Win % vs Everyone']) / 3
     
+    # Create W-L-T record string
+    df['W-L-T'] = df.apply(lambda x: f"{int(x['W'])}-{int(x['L'])}-{int(x['T'])}", axis=1)
+    
+    # Add total record vs everyone
+    df['Total W-L'] = df['Team'].map(total_record_vs_everyone)
+    
     df_ranked = df.sort_values(by='Power Score', ascending=False).reset_index(drop=True)
     df_ranked['Rank'] = df_ranked.index + 1
     
-    return df_ranked[['Rank', 'Team', 'Power Score', 'W', 'L', 'T', 'PF']]
+    return df_ranked[['Rank', 'Team', 'Power Score', 'W-L-T', 'Total W-L', 'PF']]
 
 def run_monte_carlo_simulation(teams_data, remaining_schedule, num_simulations):
     """
@@ -311,8 +330,8 @@ def process_league(league_name, league_api, league_type):
         return
 
     # 2. Calculate Power Rankings
-    win_vs_everyone = calculate_weekly_win_pct_vs_everyone(all_scores, team_map)
-    power_rankings_df = calculate_power_rankings(records_df.copy(), win_vs_everyone)
+    win_vs_everyone, total_record_vs_everyone = calculate_weekly_win_pct_vs_everyone(all_scores, team_map)
+    power_rankings_df = calculate_power_rankings(records_df.copy(), win_vs_everyone, total_record_vs_everyone)
     power_rankings_df.to_csv(f"{league_name}_power_rankings.csv", index=False)
     print(f"✓ Saved {league_name}_power_rankings.csv")
 
